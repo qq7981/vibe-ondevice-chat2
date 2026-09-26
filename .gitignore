@@ -1,0 +1,40 @@
+# 模型文件（体积大，不入库）
+server/models/
+*.mnn
+*.gguf
+
+# MNN 源码与编译中间产物（不入库；只保留编译好的 .so）
+mnn-engine/
+mnn-build/
+mnn-install/
+mnn-src/
+**/cpp/mnn-engine/
+**/cpp/mnn/lib/
+*.zip
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+*.apk
+*.iml
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 构建日志
+*.log
+*_build.txt
+rebuild.txt
+build_out*.txt
+apk_build*.txt
+
+# 系统
+.DS_Store
+Thumbs.db
