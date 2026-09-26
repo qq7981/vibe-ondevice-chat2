@@ -28,6 +28,9 @@ class MnnLlmSession {
     companion object {
         private const val TAG = "MnnLlmSession"
 
+        /** 单轮生成上限。1.5B 模型过长容易退化重复，限制在 512 token。 */
+        private const val DEFAULT_MAX_NEW_TOKENS = 512
+
         init {
             System.loadLibrary("MNN")
             System.loadLibrary("mnn_llm_jni")
@@ -57,9 +60,12 @@ class MnnLlmSession {
     /**
      * 生成回复，逐 token 流式返回。
      *
+     * [maxNewTokens] 默认 512：1.5B 小模型在长文本下容易退化重复，
+     * 加上限可以避免无限生成。传 -1 表示不限制。
+     *
      * 模型未加载时直接返回空流，调用方应先检查 [isReady]。
      */
-    fun generate(prompt: String, maxNewTokens: Int = -1): Flow<String> = callbackFlow {
+    fun generate(prompt: String, maxNewTokens: Int = DEFAULT_MAX_NEW_TOKENS): Flow<String> = callbackFlow {
         if (!isReady) {
             Log.w(TAG, "模型未就绪，忽略本次生成请求")
             close()

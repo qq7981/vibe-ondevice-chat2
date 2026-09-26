@@ -252,6 +252,10 @@ Java_com_example_vibeondevicechat_llm_MnnLlmSession_nativeGenerate(
     // 重置流状态，避免上一轮的残留字符污染本次输出。
     g_tokenStream.clear();
 
+    // Llm 实例内部会累积 history_tokens，不清空的话上一轮对话会串到本轮。
+    // 当前 App 每轮自行拼接完整 prompt，属于无状态单轮调用，因此先 reset。
+    g_llm->reset();
+
     g_genStart = Clock::now();
     g_firstTokenSeen = false;
     g_tokenCount = 0;

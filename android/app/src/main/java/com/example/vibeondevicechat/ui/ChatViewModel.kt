@@ -41,8 +41,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         /** 模型目录（相对应用外部存储根目录）。 */
         private const val MODEL_DIR = "models/qwen2.5-1.5b-int4"
 
+        /**
+         * 调试开关：非空时，模型加载完成后按顺序自动发送这些问题，
+         * 并把完整 prompt 与回答打进日志。留空即关闭。
+         * 用两条问题可以验证多轮记忆是否生效。
+         */
+        private val AUTO_TEST_PROMPTS = emptyList<String>()
+
         /** MNN 的入口配置文件，同目录下需有 llm.mnn / llm.mnn.weight / tokenizer.txt。 */
         private const val MODEL_CONFIG = "llm_config.json"
+
+        /**
+         * 参与拼接的历史消息条数上限（不含本轮）。
+         *
+         * 用的是无状态调用：每轮把完整历史重新拼进 prompt。历史越长，
+         * prefill 越慢、KV Cache 占用越大，所以需要截断。保留最近若干条
+         * 足以维持多轮语义，同时避免长对话把延迟推高到不可接受。
+         */
+        private const val MAX_HISTORY_MESSAGES = 12
     }
 
     private val session = MnnLlmSession()
@@ -85,6 +101,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     statusText = if (ok) "模型就绪 · 完全离线" else "模型加载失败",
                 )
             }
+
+            // 调试用：加载完成后自动跑一次固定输入，把完整 prompt 与回答
+            // 打进日志。用于在没有屏幕录制干扰的情况下核对输出质量。
+            if (ok && AUTO_TEST_PROMPTS.isNotEmpty()) {
+                for (q in AUTO_TEST_PROMPTS) {
+                    Log.i(TAG, "[autotest] 输入: $q")
+                    send(q)
+                    // 等这一轮生成结束（send 是异步的），再做下一轮。
+                    while (_uiState.value.isGenerating) {
+                        kotlinx.coroutines.delay(200)
+                    }
+                    kotlinx.coroutines.delay(500)
+                }
+            }
         }
     }
 
@@ -125,6 +155,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        // 本轮之前的历史（不含本轮提问），用于拼多轮上下文。
+        val history = _uiState.value.messages
+
         _uiState.update {
             it.copy(
                 messages = it.messages + ChatMessage(trimmed, isUser = true),
@@ -133,18 +166,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch {
-            // 把系统提示词拼在用户输入前，作为单轮上下文。
-            val prompt = if (systemPrompt.isBlank()) {
-                trimmed
-            } else {
-                "$systemPrompt\n\n用户：$trimmed"
-            }
+            val prompt = buildPrompt(history, trimmed)
 
             // 先把空的助手消息放进列表，后续每个 token 追加到这条上。
             _uiState.update { it.copy(messages = it.messages + ChatMessage("", isUser = false)) }
 
+            // 打印实际发给 native 的 prompt（含特殊标记），便于核对模板是否正确。
+            Log.i(TAG, "[prompt] >>>${prompt.replace("\n", "\\n")}<<<")
+
+            val answer = StringBuilder()
             try {
                 session.generate(prompt).collect { token ->
+                    answer.append(token)
                     _uiState.update { state ->
                         val updated = state.messages.toMutableList()
                         val last = updated.lastIndex
@@ -154,6 +187,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         state.copy(messages = updated)
                     }
                 }
+                Log.i(TAG, "[answer] >>>${answer}<<<")
             } catch (e: Exception) {
                 _uiState.update { state ->
                     val updated = state.messages.toMutableList()
@@ -167,6 +201,38 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(isGenerating = false) }
             }
         }
+    }
+
+    /**
+     * 构造发给模型的完整 prompt。
+     *
+     * 用 Qwen2.5 的 ChatML 格式：system / user / assistant 三种角色都必须
+     * 用 `<|im_start|>` 与 `<|im_end|>` 显式包裹。
+     *
+     * 两个曾经踩过的坑：
+     * 1. 不能把 system prompt 用纯文本拼在用户输入前面——那样它会被当成
+     *    用户发言的一部分，模型分不清角色，表现为自问自答、复述系统提示。
+     * 2. 历史必须带 role 标记逐条拼回，模型才知道哪些是它自己说过的。
+     *
+     * [history] 是此前所有消息（按时间顺序），[current] 是本轮提问。
+     * 只保留最近 [MAX_HISTORY_MESSAGES] 条，并丢弃其中内容为空的消息
+     * （流式输出失败时可能留下空助手气泡）。
+     */
+    private fun buildPrompt(history: List<ChatMessage>, current: String): String = buildString {
+        if (systemPrompt.isNotBlank()) {
+            append("<|im_start|>system\n").append(systemPrompt).append("\n<|im_end|>\n")
+        }
+        val recent = history
+            .filter { it.text.isNotBlank() }
+            .takeLast(MAX_HISTORY_MESSAGES)
+        for (msg in recent) {
+            val role = if (msg.isUser) "user" else "assistant"
+            append("<|im_start|>").append(role).append("\n")
+            append(msg.text).append("\n<|im_end|>\n")
+        }
+        append("<|im_start|>user\n").append(current).append("\n<|im_end|>\n")
+        // 以 assistant 开头结尾，模型从这里续写。
+        append("<|im_start|>assistant\n")
     }
 
     override fun onCleared() {
