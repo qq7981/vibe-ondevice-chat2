@@ -9,6 +9,7 @@
 
 #include <android/log.h>
 
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <ostream>
@@ -23,6 +24,14 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 namespace {
+
+using Clock = std::chrono::steady_clock;
+
+// 一次推理的计时状态：首 token 延迟与解码速度都据此统计。
+Clock::time_point g_genStart;
+Clock::time_point g_firstToken;
+bool g_firstTokenSeen = false;
+size_t g_tokenCount = 0;
 
 // 持有 Java 侧回调的全局引用。整个进程只服务一个推理会话，
 // 因此用单例而非把 jobject 塞进每个流的 userdata。
@@ -50,6 +59,16 @@ void emitToken(const std::string& token) {
     if (token.empty()) {
         return;
     }
+    // 计时：首个 token 的到来时刻即首 token 延迟；后续按累计个数算解码速度。
+    if (!g_firstTokenSeen) {
+        g_firstToken = Clock::now();
+        g_firstTokenSeen = true;
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            g_firstToken - g_genStart)
+                            .count();
+        LOGI("[perf] 首 token 延迟: %lld ms", static_cast<long long>(ms));
+    }
+    ++g_tokenCount;
     std::lock_guard<std::mutex> lock(g_callbackMutex);
     if (g_vm == nullptr || g_callback == nullptr || g_onTokenMethod == nullptr) {
         return;
@@ -195,6 +214,7 @@ Java_com_example_vibeondevicechat_llm_MnnLlmSession_nativeInit(
     }
 
     LOGI("加载模型: %s", path.c_str());
+    const auto loadStart = Clock::now();
     g_llm.reset(MNN::Transformer::Llm::createLLM(path));
     if (g_llm == nullptr) {
         LOGE("createLLM 返回空，config 路径可能不对");
@@ -205,7 +225,10 @@ Java_com_example_vibeondevicechat_llm_MnnLlmSession_nativeInit(
         g_llm.reset();
         return JNI_FALSE;
     }
-    LOGI("模型加载完成");
+    const auto loadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            Clock::now() - loadStart)
+                            .count();
+    LOGI("模型加载完成，耗时 %lld ms", static_cast<long long>(loadMs));
     return JNI_TRUE;
 }
 
@@ -228,8 +251,29 @@ Java_com_example_vibeondevicechat_llm_MnnLlmSession_nativeGenerate(
 
     // 重置流状态，避免上一轮的残留字符污染本次输出。
     g_tokenStream.clear();
+
+    g_genStart = Clock::now();
+    g_firstTokenSeen = false;
+    g_tokenCount = 0;
+
     g_llm->response(userContent, &g_tokenStream, nullptr, maxNewTokens);
     g_tokenStream.flush();
+
+    const auto end = Clock::now();
+    const auto totalMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end - g_genStart).count();
+    if (g_firstTokenSeen && g_tokenCount > 0) {
+        const auto decodeMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(end - g_firstToken).count();
+        // 解码速度只统计首 token 之后的部分，避免把 prefill 时间摊进去。
+        const double tokPerSec =
+            decodeMs > 0 ? (g_tokenCount - 1) * 1000.0 / decodeMs : 0.0;
+        LOGI("[perf] 生成完成: %zu tokens, 总耗时 %lld ms, 解码 %.2f tok/s",
+             g_tokenCount, static_cast<long long>(totalMs), tokPerSec);
+    } else {
+        LOGI("[perf] 生成结束但无 token 输出, 总耗时 %lld ms",
+             static_cast<long long>(totalMs));
+    }
 }
 
 // 释放模型，回收显存与内存。Activity 退出时调用。

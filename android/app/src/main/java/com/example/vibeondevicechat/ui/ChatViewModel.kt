@@ -1,6 +1,7 @@
 package com.example.vibeondevicechat.ui
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.vibeondevicechat.data.PromptRepository
@@ -35,6 +36,8 @@ data class ChatUiState(
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
+        private const val TAG = "ChatViewModel"
+
         /** 模型目录（相对应用外部存储根目录）。 */
         private const val MODEL_DIR = "models/qwen2.5-1.5b-int4"
 
@@ -91,11 +94,26 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * MNN 的入口文件是 llm_config.json（不是 config.json）——
      * 同目录下还需有 llm.mnn、llm.mnn.weight、tokenizer.txt，
      * MNN 会以 config 所在目录为基准自动查找这些文件。
+     *
+     * 这里会主动 mkdirs：外部存储目录必须由应用自己创建，否则在
+     * Android 11+ 的分区存储下，用 adb 以 shell 身份建出的目录属主是
+     * shell，应用无权进入，会误判为"模型不存在"。
      */
     private fun resolveModelConfigPath(): String? {
         val dir = File(getApplication<Application>().getExternalFilesDir(null), MODEL_DIR)
+        if (!dir.isDirectory && !dir.mkdirs()) {
+            Log.e(TAG, "模型目录创建失败: ${dir.absolutePath}")
+        }
+        Log.i(TAG, "模型目录: ${dir.absolutePath}")
+        val entries = dir.list()?.joinToString() ?: "<无法列出>"
+        Log.i(TAG, "目录内容: $entries")
+
         val config = File(dir, MODEL_CONFIG)
-        return if (config.isFile) config.absolutePath else null
+        if (!config.isFile) {
+            Log.e(TAG, "未找到 $MODEL_CONFIG，实际路径: ${config.absolutePath}")
+            return null
+        }
+        return config.absolutePath
     }
 
     /**
