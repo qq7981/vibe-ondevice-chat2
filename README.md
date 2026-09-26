@@ -2,8 +2,16 @@
 
 > 基于 [MNN](https://github.com/alibaba/MNN) 的端侧大模型本地对话 Android App，**完全离线推理**，前后端同仓（monorepo）。
 
-> **演示录屏待补**：计划录一段「飞行模式 → 提问 → 流式回答」，存为 `docs/demo.gif` 后替换本行。
-> 在补上之前不放占位图，避免 README 出现坏图。
+## 演示
+
+![demo](docs/demo.gif)
+
+真机录屏，**飞行模式开启**下的连续多轮问答，逐 token 流式输出。
+
+下图是同一段录屏的状态栏放大：飞机图标常亮，旁边**没有 Wi-Fi 图标、没有信号格**，
+证明推理全程无网络。
+
+![offline proof](docs/offline-proof.png)
 
 ## 一句话定位
 
@@ -147,13 +155,14 @@ vibe-ondevice-chat/
 │           └── data/               # PromptRepository
 ├── server/                         # FastAPI：模型下发 + Prompt 配置
 ├── prompts/                        # Prompt 模板
-├── docs/                           # 架构图、性能数据
+├── docs/                           # 架构图、演示 GIF、性能数据
 ├── tools/                          # 架构图生成脚本
 └── README.md
 ```
 
 `docs/architecture.png` 是生成物，不要手改；改架构请改 `tools/make_architecture.py` 后重新生成。
-`docs/benchmark.md` 中的性能数字需要真机实测后填写，未实测的项会明确标注为待测。
+`docs/benchmark.md` 中的性能数字来自真机实测，未实测的项会明确标注为待测。
+`docs/demo.gif` 与 `docs/offline-proof.png` 是同一段真机录屏的裁剪产物，画面为实拍屏幕，非后期合成。
 
 ## 已配置的国内镜像
 
@@ -169,6 +178,7 @@ vibe-ondevice-chat/
 - [x] Compose 聊天界面
 - [x] Prompt 服务端下发
 - [x] 真机实测性能数据（一加 Ace 2，飞行模式下）
+- [x] 真机录屏演示（含飞行模式无网络证据）
 - [x] 多轮对话记忆（历史按 ChatML role 标记回填）
 - [x] 采样参数调优（重复惩罚 / 温度 / topP），修复输出退化
 - [ ] KV Cache 复用，避免每轮重算 prefill
