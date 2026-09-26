@@ -2,8 +2,8 @@
 
 > 基于 [MNN](https://github.com/alibaba/MNN) 的端侧大模型本地对话 Android App，**完全离线推理**，前后端同仓（monorepo）。
 
-<!-- 放演示 GIF：录一段"飞行模式 → 提问 → 流式回答"，最能证明离线推理是真的 -->
-![demo](docs/demo.gif)
+> **演示录屏待补**：计划录一段「飞行模式 → 提问 → 流式回答」，存为 `docs/demo.gif` 后替换本行。
+> 在补上之前不放占位图，避免 README 出现坏图。
 
 ## 一句话定位
 
@@ -19,31 +19,10 @@
 
 ![architecture](docs/architecture.png)
 
-```
-┌──────────────────────────────────────┐        ┌────────────────────┐
-│  Android App (Kotlin + Compose)      │        │  Server (FastAPI)  │
-│  ┌────────────────────────────────┐  │        │   模型下发          │
-│  │ ChatScreen (Compose UI)        │  │  HTTP  │   Prompt 配置       │
-│  └──────────────┬─────────────────┘  │◄──────►│   版本管理          │
-│                 │ StateFlow          │        └────────────────────┘
-│  ┌──────────────▼─────────────────┐  │
-│  │ ChatViewModel                  │  │
-│  └──────────────┬─────────────────┘  │
-│                 │ Flow<String>       │
-│  ┌──────────────▼─────────────────┐  │
-│  │ MnnLlmSession (Kotlin)         │  │
-│  └──────────────┬─────────────────┘  │
-│                 │ JNI                │
-│  ┌──────────────▼─────────────────┐  │
-│  │ llm_jni.cpp                    │  │
-│  │  └ TokenStream : std::ostream  │  │  ← 逐 token 回调的实现
-│  └──────────────┬─────────────────┘  │
-│                 │                    │
-│  ┌──────────────▼─────────────────┐  │
-│  │ libMNN.so (INT4 量化模型)       │  │
-│  └────────────────────────────────┘  │
-└──────────────────────────────────────┘
-```
+数据流概览：Compose UI → `ChatViewModel` → `MnnLlmSession`(Kotlin) → JNI → `TokenStream` → MNN 引擎；
+推理结果反向逐 token 回流到界面。服务端只下发 Prompt 与模型元信息，**不参与推理**。
+
+架构图由 `tools/make_architecture.py` 生成（`python tools/make_architecture.py`），改动架构时重新跑一遍即可。
 
 ## 性能数据
 
@@ -164,8 +143,12 @@ vibe-ondevice-chat/
 ├── server/                         # FastAPI：模型下发 + Prompt 配置
 ├── prompts/                        # Prompt 模板
 ├── docs/                           # 架构图、性能数据
+├── tools/                          # 架构图生成脚本
 └── README.md
 ```
+
+`docs/architecture.png` 是生成物，不要手改；改架构请改 `tools/make_architecture.py` 后重新生成。
+`docs/benchmark.md` 中的性能数字需要真机实测后填写，未实测的项会明确标注为待测。
 
 ## 已配置的国内镜像
 
