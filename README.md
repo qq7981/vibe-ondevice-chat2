@@ -23,6 +23,8 @@
 
 本项目完整走通了这条链路，其中最有价值的部分是**自己写的 JNI 桥接层**：MNN 的 C++ API 只支持 `std::ostream` 输出，不提供逐 token 回调。我实现了一个 `std::ostream` 子类，把字节流按 UTF-8 边界切分后实时回调到 Kotlin，从而在 Java 侧实现流式输出。
 
+另一个花了不少功夫的点是**让 MNN 的 KV Cache 真正命中**。启用后缓存始终不命中，逐字节比对才发现：客户端回传的 assistant 文本比引擎内部记录的多一个换行（`end_with` 默认 `"\n"` 被写进了输出流），就是这一个字符让九百多字符的前缀全部作废。细节见 [`docs/benchmark.md`](docs/benchmark.md) 优化记录第 8 条。
+
 ## 架构
 
 ![architecture](docs/architecture.png)
@@ -41,13 +43,17 @@
 | 模型 | Qwen2.5-1.5B-Instruct (INT4) |
 | 模型文件大小 | 868 MB（权重）/ 832 MB（全部文件） |
 | 模型加载耗时 | **1351–2346 ms** |
-| 首 token 延迟 | **526–1078 ms** |
+| 首 token 延迟 | **526–1078 ms**（首轮） |
+| 多轮首 token 延迟 | **730 / 554 ms**（第 2、3 轮，KV Cache 复用后） |
 | 解码速度 | **约 37 tok/s**（长回复稳定值） |
 | 峰值内存 | **约 1029 MB** (PSS) |
 | APK 体积 | 13.7 MB（含 libMNN.so，不含模型） |
 
 多轮记忆已实测验证：问「我叫小明，请记住」→「好的，小明。」，
 再问「我叫什么名字？」→「小明。」
+
+**KV Cache 复用已启用**：连续多轮对话只 prefill 新增内容，首 token 延迟不随轮数增长。
+实测三轮对话的 prefill 从启用前的 2.9s / 5.3s / 9.1s 降到 2.8s / 0.7s / 0.5s。
 
 更完整的测试方法、已知限制与优化记录见 [`docs/benchmark.md`](docs/benchmark.md)。
 
@@ -181,7 +187,7 @@ vibe-ondevice-chat/
 - [x] 真机录屏演示（含飞行模式无网络证据）
 - [x] 多轮对话记忆（历史按 ChatML role 标记回填）
 - [x] 采样参数调优（重复惩罚 / 温度 / topP），修复输出退化
-- [ ] KV Cache 复用，避免每轮重算 prefill
+- [x] KV Cache 复用（增量 prefill，首 token 延迟不随轮数增长）
 - [ ] 端侧 / 云端混合推理路由
 - [ ] 端侧 Function Calling
 - [ ] iOS 端

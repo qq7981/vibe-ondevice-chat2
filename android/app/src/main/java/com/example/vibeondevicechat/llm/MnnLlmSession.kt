@@ -81,6 +81,48 @@ class MnnLlmSession {
         awaitClose { tokenChannel = null }
     }.flowOn(Dispatchers.IO)
 
+    /**
+     * 生成回复，走 MNN 的 ChatMessages 路径，可复用跨轮的 KV Cache。
+     *
+     * 前提是模型 config 里配了 `jinja.chat_template`——没有模板时 MNN 会退化成
+     * 把各条消息的内容裸拼在一起，role 丢失，模型会角色混淆。调用方需保证
+     * 模板已配置。
+     *
+     * 与 [generate] 的区别在于历史由 MNN 自己维护：本轮只需传入**新增**的消息，
+     * 它会与上一轮做前缀比对，只 prefill 增量部分。因此连续对话的首 token 延迟
+     * 不随轮数增长。要重开一段对话请调 [resetCache]。
+     */
+    fun generateChat(
+        messages: List<ChatMessage>,
+        maxNewTokens: Int = DEFAULT_MAX_NEW_TOKENS,
+    ): Flow<String> = callbackFlow {
+        if (!isReady) {
+            Log.w(TAG, "模型未就绪，忽略本次生成请求")
+            close()
+            return@callbackFlow
+        }
+        tokenChannel = this
+        try {
+            nativeGenerateChat(
+                messages.map { it.role }.toTypedArray(),
+                messages.map { it.content }.toTypedArray(),
+                maxNewTokens,
+            )
+        } finally {
+            tokenChannel = null
+            close()
+        }
+        awaitClose { tokenChannel = null }
+    }.flowOn(Dispatchers.IO)
+
+    /**
+     * 清空 MNN 侧缓存的对话历史。开新对话或切换会话时调用，
+     * 否则上一段对话的 KV 会被当成前缀复用。
+     */
+    suspend fun resetCache() {
+        withContext(Dispatchers.IO) { nativeResetCache() }
+    }
+
     /** 释放模型占用的内存。 */
     suspend fun release() {
         withContext(Dispatchers.IO) {
@@ -112,6 +154,19 @@ class MnnLlmSession {
 
     private external fun nativeInit(configPath: String, callback: Any): Boolean
     private external fun nativeGenerate(prompt: String, maxNewTokens: Int)
+    private external fun nativeGenerateChat(roles: Array<String>, contents: Array<String>, maxNewTokens: Int)
+    private external fun nativeResetCache()
     private external fun nativeRelease()
     private external fun nativeIsReady(): Boolean
 }
+
+/**
+ * 一条对话消息，对应 MNN 的 ChatMessages 元素。
+ *
+ * [role] 必须是 ChatML 认识的取值（system / user / assistant），
+ * MNN 会把它填进 chat_template 的 role 位。
+ */
+data class ChatMessage(
+    val role: String,
+    val content: String,
+)

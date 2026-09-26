@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.vibeondevicechat.data.PromptRepository
+import com.example.vibeondevicechat.llm.ChatMessage as MnnChatMessage
 import com.example.vibeondevicechat.llm.MnnLlmSession
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -166,17 +167,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch {
-            val prompt = buildPrompt(history, trimmed)
+            val messages = buildMessages(history, trimmed)
 
             // 先把空的助手消息放进列表，后续每个 token 追加到这条上。
             _uiState.update { it.copy(messages = it.messages + ChatMessage("", isUser = false)) }
 
-            // 打印实际发给 native 的 prompt（含特殊标记），便于核对模板是否正确。
-            Log.i(TAG, "[prompt] >>>${prompt.replace("\n", "\\n")}<<<")
+            // 打印实际发给 native 的消息列表，便于核对角色与历史回填是否正确。
+            Log.i(TAG, "[messages] >>>${messages.joinToString(" | ") { "${it.role}:${it.content}" }}<<<")
 
             val answer = StringBuilder()
             try {
-                session.generate(prompt).collect { token ->
+                session.generateChat(messages).collect { token ->
                     answer.append(token)
                     _uiState.update { state ->
                         val updated = state.messages.toMutableList()
@@ -204,35 +205,43 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * 构造发给模型的完整 prompt。
+     * 构造发给模型的消息列表。
      *
-     * 用 Qwen2.5 的 ChatML 格式：system / user / assistant 三种角色都必须
-     * 用 `<|im_start|>` 与 `<|im_end|>` 显式包裹。
+     * 这里**不再自己拼 ChatML 文本**，而是把 role 与 content 分开交给 MNN：
+     * 模型 config 里配了 `jinja.chat_template`，由 MNN 按 Qwen2.5 的模板渲染。
+     * 这样做的收益是 MNN 能启用 prompt cache——它对本轮与上一轮的渲染结果做
+     * 前缀比对，只 prefill 新增的 suffix，首 token 延迟不再随对话轮数线性增长。
      *
-     * 两个曾经踩过的坑：
-     * 1. 不能把 system prompt 用纯文本拼在用户输入前面——那样它会被当成
-     *    用户发言的一部分，模型分不清角色，表现为自问自答、复述系统提示。
-     * 2. 历史必须带 role 标记逐条拼回，模型才知道哪些是它自己说过的。
+     * 如果改回自己拼文本、调 `response(string)`，MNN 拿不到角色信息，
+     * 会退化成每轮全量重算 prefill。
+     *
+     * **assistant 回复必须去掉末尾换行。** MNN 的 `end_with` 默认为 `"\n"`，
+     * 生成结束时会把换行一起写进输出流，所以客户端从流式 token 拼出的文本
+     * 比 MNN 内部记录的回复多一个 `\n`。而缓存文本是用 `tokenizer_decode`
+     * 重建的、不含这个换行——带着它回传，前缀比对会在倒数第二个字符处失配，
+     * 缓存永远 MISS、每轮全量重算。这里统一裁掉，两边表示就对齐了。
      *
      * [history] 是此前所有消息（按时间顺序），[current] 是本轮提问。
      * 只保留最近 [MAX_HISTORY_MESSAGES] 条，并丢弃其中内容为空的消息
      * （流式输出失败时可能留下空助手气泡）。
      */
-    private fun buildPrompt(history: List<ChatMessage>, current: String): String = buildString {
+    private fun buildMessages(history: List<ChatMessage>, current: String): List<MnnChatMessage> {
+        val messages = mutableListOf<MnnChatMessage>()
         if (systemPrompt.isNotBlank()) {
-            append("<|im_start|>system\n").append(systemPrompt).append("\n<|im_end|>\n")
+            messages += MnnChatMessage("system", systemPrompt)
         }
-        val recent = history
+        history
             .filter { it.text.isNotBlank() }
             .takeLast(MAX_HISTORY_MESSAGES)
-        for (msg in recent) {
-            val role = if (msg.isUser) "user" else "assistant"
-            append("<|im_start|>").append(role).append("\n")
-            append(msg.text).append("\n<|im_end|>\n")
-        }
-        append("<|im_start|>user\n").append(current).append("\n<|im_end|>\n")
-        // 以 assistant 开头结尾，模型从这里续写。
-        append("<|im_start|>assistant\n")
+            .forEach { msg ->
+                if (msg.isUser) {
+                    messages += MnnChatMessage("user", msg.text)
+                } else {
+                    messages += MnnChatMessage("assistant", msg.text.trimEnd('\n', '\r'))
+                }
+            }
+        messages += MnnChatMessage("user", current)
+        return messages
     }
 
     override fun onCleared() {

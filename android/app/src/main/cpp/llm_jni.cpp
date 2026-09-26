@@ -280,6 +280,94 @@ Java_com_example_vibeondevicechat_llm_MnnLlmSession_nativeGenerate(
     }
 }
 
+// 发起一次多轮对话推理，走 MNN 的 ChatMessages 重载。
+//
+// 与 nativeGenerate 的区别：那条路径传的是已经拼好的裸文本，MNN 只会
+// 全量重新 prefill；这条路径把 role/content 一并交给 MNN，配合 config 里的
+// jinja.chat_template，MNN 才能按模板渲染并启用 prompt cache ——
+// 它会把本轮 prompt 与上一轮做前缀比对，只 prefill 新增的 suffix。
+//
+// roles/contents 是等长的平行数组。返回前不清空历史，缓存跨轮复用；
+// 需要重开一段对话时调用 nativeResetCache。
+JNIEXPORT void JNICALL
+Java_com_example_vibeondevicechat_llm_MnnLlmSession_nativeGenerateChat(
+    JNIEnv* env, jobject /*thiz*/, jobjectArray roles, jobjectArray contents, jint maxNewTokens) {
+    std::lock_guard<std::mutex> lock(g_llmMutex);
+    if (g_llm == nullptr) {
+        LOGE("nativeGenerateChat 在未初始化时被调用");
+        return;
+    }
+
+    const jsize count = env->GetArrayLength(roles);
+    if (count != env->GetArrayLength(contents)) {
+        LOGE("roles 与 contents 长度不一致，忽略本次请求");
+        return;
+    }
+
+    MNN::Transformer::ChatMessages messages;
+    messages.reserve(static_cast<size_t>(count));
+    for (jsize i = 0; i < count; ++i) {
+        auto roleStr = static_cast<jstring>(env->GetObjectArrayElement(roles, i));
+        auto contentStr = static_cast<jstring>(env->GetObjectArrayElement(contents, i));
+        if (roleStr == nullptr || contentStr == nullptr) {
+            LOGE("第 %d 条消息为空，忽略本次请求", i);
+            if (roleStr != nullptr) env->DeleteLocalRef(roleStr);
+            if (contentStr != nullptr) env->DeleteLocalRef(contentStr);
+            return;
+        }
+        const char* roleChars = env->GetStringUTFChars(roleStr, nullptr);
+        const char* contentChars = env->GetStringUTFChars(contentStr, nullptr);
+        messages.emplace_back(std::string(roleChars), std::string(contentChars));
+        env->ReleaseStringUTFChars(roleStr, roleChars);
+        env->ReleaseStringUTFChars(contentStr, contentChars);
+        env->DeleteLocalRef(roleStr);
+        env->DeleteLocalRef(contentStr);
+    }
+
+    g_tokenStream.clear();
+    g_genStart = Clock::now();
+    g_firstTokenSeen = false;
+    g_tokenCount = 0;
+
+    g_llm->response(messages, &g_tokenStream, nullptr, maxNewTokens);
+    g_tokenStream.flush();
+
+    // 缓存是否生效，看 prefill 耗时与 KV 长度最直接：命中前缀时只 prefill 增量，
+    // prefill_us 会显著小于全量重算，all_seq_len 则会跨轮累积。
+    if (const auto* ctx = g_llm->getContext()) {
+        LOGI("[cache] prefill=%lld ms, all_seq_len=%d, history=%zu",
+             static_cast<long long>(ctx->prefill_us / 1000), ctx->all_seq_len,
+             ctx->history_tokens.size());
+    }
+
+    const auto end = Clock::now();
+    const auto totalMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end - g_genStart).count();
+    if (g_firstTokenSeen && g_tokenCount > 0) {
+        const auto decodeMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(end - g_firstToken).count();
+        const double tokPerSec =
+            decodeMs > 0 ? (g_tokenCount - 1) * 1000.0 / decodeMs : 0.0;
+        LOGI("[perf] 生成完成: %zu tokens, 总耗时 %lld ms, 解码 %.2f tok/s",
+             g_tokenCount, static_cast<long long>(totalMs), tokPerSec);
+    } else {
+        LOGI("[perf] 生成结束但无 token 输出, 总耗时 %lld ms",
+             static_cast<long long>(totalMs));
+    }
+}
+
+// 清空 Llm 内部缓存的对话历史，下一轮重新全量 prefill。
+JNIEXPORT void JNICALL
+Java_com_example_vibeondevicechat_llm_MnnLlmSession_nativeResetCache(JNIEnv* /*env*/,
+                                                                    jobject /*thiz*/) {
+    std::lock_guard<std::mutex> lock(g_llmMutex);
+    if (g_llm == nullptr) {
+        return;
+    }
+    g_llm->reset();
+    LOGI("对话历史已清空");
+}
+
 // 释放模型，回收显存与内存。Activity 退出时调用。
 JNIEXPORT void JNICALL
 Java_com_example_vibeondevicechat_llm_MnnLlmSession_nativeRelease(
